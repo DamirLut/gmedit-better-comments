@@ -1,0 +1,28 @@
+{
+  "name": "better-comments",
+  "description": "Highlights important comment tags in code.",
+  "scripts": ["main.js"],
+  "stylesheets": ["styles.css"],
+  "betterComments": {
+    "tags": [
+      { "name": "todo", "match": "TODO\\b:?", "color": "#4DA3FF" },
+      { "name": "fixme", "match": "FIXME\\b:?", "color": "#FF5F57" },
+      { "name": "danger", "match": "DANGER\\b:?", "color": "#FF5F57" },
+      { "name": "hack", "match": "HACK\\b:?", "color": "#BF7AF0" },
+      { "name": "note", "match": "NOTE\\b:?", "color": "#32D74B" },
+      { "name": "warn", "match": "(?:WARNING|WARN)\\b:?", "color": "#FFB340" },
+      {
+        "name": "question",
+        "match": "(?:QUESTION|ASK)\\b:?",
+        "color": "#64D2FF"
+      },
+      { "name": "warn", "match": "!", "color": "#FFB340", "leadingOnly": true },
+      {
+        "name": "question",
+        "match": "\\?",
+        "color": "#64D2FF",
+        "leadingOnly": true
+      }
+    ]
+  }
+}
