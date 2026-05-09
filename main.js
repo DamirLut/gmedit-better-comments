@@ -3,9 +3,14 @@
   var sessions = [];
   var tags = [];
   var regions = [];
+  var baseTagsRaw = [];
+  var baseRegionsRaw = [];
   var inlineRegionColors = [];
   var styleEl = null;
   var stylePending = false;
+  var Project = null;
+
+  var PROJECT_CONFIG_PATH = ".gmedit/better-comments.json";
 
   var STATE_PATCHES = {
     start: "start",
@@ -114,6 +119,62 @@
     return out;
   }
 
+  function getTagMergeKey(raw) {
+    return slugify(raw && raw.name);
+  }
+
+  function getRegionMergeKey(raw) {
+    var name = String((raw && raw.name) || "").trim();
+    return name.split(/\s+/)[0];
+  }
+
+  function isValidTagEntry(raw) {
+    return (
+      !!getTagMergeKey(raw) &&
+      !!String((raw && raw.match) || "").trim() &&
+      isValidColor(raw && raw.color)
+    );
+  }
+
+  function isValidRegionEntry(raw) {
+    return !!getRegionMergeKey(raw) && isValidColor(raw && raw.color);
+  }
+
+  function mergeRawEntries(baseEntries, projectEntries, getKey, isValidEntry) {
+    var base = Array.isArray(baseEntries) ? baseEntries : [];
+    var project = Array.isArray(projectEntries) ? projectEntries : [];
+    var validProject = [];
+    var projectKeys = {};
+    var out = [];
+
+    for (var i = 0; i < project.length; i++) {
+      if (!isValidEntry(project[i])) continue;
+      var projectKey = getKey(project[i]);
+      projectKeys[projectKey] = true;
+      validProject.push(project[i]);
+    }
+
+    for (var j = 0; j < base.length; j++) {
+      var baseKey = getKey(base[j]);
+      if (!baseKey || !projectKeys[baseKey]) out.push(base[j]);
+    }
+
+    return out.concat(validProject);
+  }
+
+  function readProjectConfig() {
+    var project = Project && Project.current;
+    if (!project || !project.path || !project.existsSync) return null;
+
+    try {
+      if (!project.existsSync(PROJECT_CONFIG_PATH)) return null;
+      return project.readJsonFileSync(PROJECT_CONFIG_PATH);
+    } catch (error) {
+      console.warn("better-comments: failed to read project config", error);
+      return null;
+    }
+  }
+
   function makeRule(tag, kind) {
     var tagToken = token(tag.slug);
 
@@ -201,12 +262,30 @@
     session.bgTokenizer.start(0);
   }
 
+  function setRuleMeta(rules, key, value) {
+    try {
+      Object.defineProperty(rules, key, {
+        value: value,
+        writable: true,
+        configurable: true,
+      });
+    } catch (error) {
+      rules[key] = value;
+    }
+  }
+
+  function clearRuleMeta(rules) {
+    try {
+      delete rules.$betterCommentsPatched;
+      delete rules.$betterCommentsRulesByState;
+    } catch (error) {
+      rules.$betterCommentsPatched = false;
+      rules.$betterCommentsRulesByState = undefined;
+    }
+  }
+
   function patchRules(rules) {
-    if (
-      !rules ||
-      rules.$betterCommentsPatched
-    )
-      return false;
+    if (!rules || rules.$betterCommentsPatched) return false;
 
     var byState = {};
 
@@ -248,13 +327,18 @@
       }
     }
 
-    rules.$betterCommentsPatched = true;
-    rules.$betterCommentsRulesByState = byState;
+    setRuleMeta(rules, "$betterCommentsPatched", true);
+    setRuleMeta(rules, "$betterCommentsRulesByState", byState);
     return true;
   }
 
   function unpatchRules(rules) {
-    if (!rules || !rules.$betterCommentsPatched) return false;
+    if (!rules) return false;
+
+    if (!rules.$betterCommentsPatched) {
+      clearRuleMeta(rules);
+      return false;
+    }
 
     var byState = rules.$betterCommentsRulesByState || {};
 
@@ -270,9 +354,42 @@
       }
     }
 
-    rules.$betterCommentsPatched = false;
-    rules.$betterCommentsRulesByState = null;
+    clearRuleMeta(rules);
     return true;
+  }
+
+  function unpatchAllRules() {
+    var seenRules = [];
+
+    for (var i = 0; i < sessions.length; i++) {
+      var session = sessions[i];
+      var info = getRuleInfo(session);
+      var rules = info ? info.rules : null;
+
+      if (rules && seenRules.indexOf(rules) < 0) {
+        seenRules.push(rules);
+        unpatchRules(rules);
+      }
+
+      if (info) {
+        reloadTokenizer(session, info);
+      }
+    }
+  }
+
+  function updateEditorsFull() {
+    for (var i = 0; i < editors.length; i++) {
+      var editor = editors[i];
+      if (editor.renderer && editor.renderer.updateFull) {
+        editor.renderer.updateFull();
+      }
+    }
+  }
+
+  function refreshAllEditors() {
+    for (var i = 0; i < editors.length; i++) {
+      refreshEditor(editors[i]);
+    }
   }
 
   function getUniqueTagsBySlug() {
@@ -431,21 +548,86 @@
     patchEditor(e.editor);
   }
 
-  function init(state) {
-    var config = state && state.config ? state.config : {};
-    var betterComments = config.betterComments || {};
+  function applyConfig(projectConfig) {
+    projectConfig = projectConfig || {};
+    var mergedTags = mergeRawEntries(
+      baseTagsRaw,
+      projectConfig.tags,
+      getTagMergeKey,
+      isValidTagEntry
+    );
+    var mergedRegions = mergeRawEntries(
+      baseRegionsRaw,
+      projectConfig.regions,
+      getRegionMergeKey,
+      isValidRegionEntry
+    );
 
-    tags = normalizeTags(betterComments.tags);
-    regions = normalizeRegions(betterComments.regions);
+    unpatchAllRules();
+
+    tags = normalizeTags(mergedTags);
+    regions = normalizeRegions(mergedRegions);
     inlineRegionColors = getInlineRegionColors();
     injectStyle();
 
+    refreshAllEditors();
+    updateEditorsFull();
+  }
+
+  function reloadConfig() {
+    applyConfig(readProjectConfig());
+  }
+
+  function onProjectOpen() {
+    reloadConfig();
+  }
+
+  function onProjectClose() {
+    applyConfig(null);
+  }
+
+  function isProjectConfigFile(file) {
+    if (!file || !file.path || !Project || !Project.current) return false;
+
+    var project = Project.current;
+    var relPath = project.relPath ? project.relPath(file.path) : file.path;
+    relPath = String(relPath || "").replace(/\\/g, "/");
+
+    return relPath == PROJECT_CONFIG_PATH;
+  }
+
+  function onFileSaveOrReload(e) {
+    if (e && isProjectConfigFile(e.file)) {
+      reloadConfig();
+    }
+  }
+
+  function init(state) {
+    var config = state && state.config ? state.config : {};
+    var betterComments = config.betterComments || {};
+    Project = $gmedit["gml.Project"];
+
+    baseTagsRaw = Array.isArray(betterComments.tags) ? betterComments.tags : [];
+    baseRegionsRaw = Array.isArray(betterComments.regions)
+      ? betterComments.regions
+      : [];
+
     patchEditor(window.aceEditor);
     GMEdit.on("editorCreated", onEditorCreated);
+    GMEdit.on("projectOpen", onProjectOpen);
+    GMEdit.on("projectClose", onProjectClose);
+    GMEdit.on("fileSave", onFileSaveOrReload);
+    GMEdit.on("fileReload", onFileSaveOrReload);
+
+    reloadConfig();
   }
 
   function cleanup() {
     GMEdit.off("editorCreated", onEditorCreated);
+    GMEdit.off("projectOpen", onProjectOpen);
+    GMEdit.off("projectClose", onProjectClose);
+    GMEdit.off("fileSave", onFileSaveOrReload);
+    GMEdit.off("fileReload", onFileSaveOrReload);
     removeStyle();
 
     for (var i = 0; i < editors.length; i++) {
@@ -461,35 +643,18 @@
       editor.$betterCommentsPatched = false;
     }
 
-    var seenRules = [];
-    for (var j = 0; j < sessions.length; j++) {
-      var session = sessions[j];
-      var info = getRuleInfo(session);
-      var rules = info ? info.rules : null;
-
-      if (rules && seenRules.indexOf(rules) < 0) {
-        seenRules.push(rules);
-        unpatchRules(rules);
-      }
-
-      if (info) {
-        reloadTokenizer(session, info);
-      }
-    }
-
-    for (var k = 0; k < editors.length; k++) {
-      var current = editors[k];
-      if (current.renderer && current.renderer.updateFull) {
-        current.renderer.updateFull();
-      }
-    }
+    unpatchAllRules();
+    updateEditorsFull();
 
     editors = [];
     sessions = [];
     tags = [];
     regions = [];
+    baseTagsRaw = [];
+    baseRegionsRaw = [];
     inlineRegionColors = [];
     stylePending = false;
+    Project = null;
   }
 
   GMEdit.register("better-comments", {
