@@ -2,7 +2,8 @@
 
 Highlights important comment tags in GMEdit.
 
-![Preview](.github/preview.png)
+![Comments Preview](.github/comments.png)
+![Region Preview](.github/regions.png)
 
 ## Supported Tags
 
@@ -61,3 +62,44 @@ Example:
 ```
 
 After changing `config.json`, reload the plugin or restart GMEdit.
+
+## Regions
+
+You can also color `#region` labels by the first word after `#region`.
+
+```json
+{
+  "name": "Components",
+  "color": "#98C379"
+}
+```
+
+Place entries in `betterComments.regions`:
+
+```json
+"regions": [
+  { "name": "Components", "color": "#98C379" }
+]
+```
+
+This colors region labels that start with `Components`:
+
+```gml
+#region Components
+#region Components UI
+```
+
+It does not color regions where `Components` is not the first word:
+
+```gml
+#region UI Components
+```
+
+Inline colors are also supported:
+
+```gml
+#region[#98C379] Components
+#region [#F80] Fast path
+```
+
+Only the region label is recolored. `#region`, `[hex]`, and `#endregion` keep their normal GMEdit styling.

@@ -23,6 +23,13 @@
         "color": "#64D2FF",
         "leadingOnly": true
       }
+    ],
+    "regions": [
+      { "name": "Private", "color": "#fc1c03" },
+      {
+        "name": "Public",
+        "color": "#32D74B"
+      }
     ]
   }
 }

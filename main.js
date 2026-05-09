@@ -2,7 +2,10 @@
   var editors = [];
   var sessions = [];
   var tags = [];
+  var regions = [];
+  var inlineRegionColors = [];
   var styleEl = null;
+  var stylePending = false;
 
   var STATE_PATCHES = {
     start: "start",
@@ -21,6 +24,10 @@
       .toLowerCase()
       .replace(/[^a-z0-9_-]+/g, "-")
       .replace(/^-+|-+$/g, "");
+  }
+
+  function escapeRegex(text) {
+    return String(text).replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
   }
 
   function isValidColor(color) {
@@ -80,6 +87,33 @@
     return out;
   }
 
+  function normalizeRegions(rawRegions) {
+    var out = [];
+    var seen = {};
+
+    if (!Array.isArray(rawRegions)) return out;
+
+    for (var i = 0; i < rawRegions.length; i++) {
+      var raw = rawRegions[i] || {};
+      var name = String(raw.name || "").trim();
+      var firstWord = name.split(/\s+/)[0];
+      var slug = slugify(firstWord);
+
+      if (!slug || !firstWord || seen[firstWord] || !isValidColor(raw.color)) {
+        continue;
+      }
+
+      seen[firstWord] = true;
+      out.push({
+        name: firstWord,
+        slug: slug,
+        color: normalizeColor(raw.color),
+      });
+    }
+
+    return out;
+  }
+
   function makeRule(tag, kind) {
     var tagToken = token(tag.slug);
 
@@ -106,6 +140,28 @@
     return {
       token: ["comment", tagToken, tagToken],
       regex: "(\\s*)(" + tag.match + ")(.*$)",
+      $betterComments: true,
+    };
+  }
+
+  function makeInlineRegionRule() {
+    return {
+      token: function (prefix, colorPart, label) {
+        var colorMatch = /#([0-9a-f]{6}|[0-9a-f]{3})/i.exec(colorPart);
+        var slug = colorMatch ? "hex_" + colorMatch[1].toLowerCase() : "hex";
+
+        return ["preproc.region", "regionname", "comment.better.region." + slug];
+      },
+      regex:
+        "(#region\\b[ \\t]*)(\\[#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\][ \\t]*)(.*\\S.*$)",
+      $betterComments: true,
+    };
+  }
+
+  function makeConfiguredRegionRule(region) {
+    return {
+      token: ["preproc.region", "comment.better.region." + region.slug],
+      regex: "(#region\\b[ \\t]*)(" + escapeRegex(region.name) + "\\b.*$)",
       $betterComments: true,
     };
   }
@@ -146,7 +202,10 @@
   }
 
   function patchRules(rules) {
-    if (!rules || rules.$betterCommentsPatched || tags.length == 0)
+    if (
+      !rules ||
+      rules.$betterCommentsPatched
+    )
       return false;
 
     var byState = {};
@@ -166,6 +225,27 @@
       }
 
       byState[stateName] = inserted;
+    }
+
+    var startRules = rules.start;
+    if (startRules) {
+      var regionInserted = [];
+
+      for (var j = regions.length - 1; j >= 0; j--) {
+        var regionRule = makeConfiguredRegionRule(regions[j]);
+        startRules.unshift(regionRule);
+        regionInserted.push(regionRule);
+      }
+
+      var inlineRegionRule = makeInlineRegionRule();
+      startRules.unshift(inlineRegionRule);
+      regionInserted.push(inlineRegionRule);
+
+      if (byState.start) {
+        byState.start = byState.start.concat(regionInserted);
+      } else {
+        byState.start = regionInserted;
+      }
     }
 
     rules.$betterCommentsPatched = true;
@@ -209,6 +289,34 @@
     return unique;
   }
 
+  function getInlineRegionColors() {
+    var seen = {};
+    var colors = [];
+    var rx = /^\s*#region\b[ \t]*\[(#(?:[0-9a-f]{3}|[0-9a-f]{6}))\]/i;
+
+    for (var i = 0; i < sessions.length; i++) {
+      var session = sessions[i];
+      if (!session || !session.getLength || !session.getLine) continue;
+
+      for (var row = 0; row < session.getLength(); row++) {
+        var match = rx.exec(session.getLine(row));
+        if (!match) continue;
+
+        var color = normalizeColor(match[1]);
+        var slug = "hex_" + color.substring(1).toLowerCase();
+
+        if (seen[slug]) continue;
+        seen[slug] = true;
+        colors.push({
+          slug: slug,
+          color: color,
+        });
+      }
+    }
+
+    return colors;
+  }
+
   function buildCss() {
     var css = [];
     var unique = getUniqueTagsBySlug();
@@ -223,13 +331,32 @@
       css.push(style);
     }
 
+    for (var j = 0; j < regions.length; j++) {
+      var region = regions[j];
+      css.push(`#app .ace-tm .ace_better.ace_region.ace_${region.slug} {
+  color: ${region.color};
+  background-color: ${hexToRgba(region.color, 0.14)};
+  font-weight: 700;
+}`);
+    }
+
+    for (var k = 0; k < inlineRegionColors.length; k++) {
+      var inlineRegion = inlineRegionColors[k];
+      css.push(`#app .ace-tm .ace_better.ace_region.ace_${inlineRegion.slug} {
+  color: ${inlineRegion.color};
+  background-color: ${hexToRgba(inlineRegion.color, 0.14)};
+  font-weight: 700;
+}`);
+    }
+
     return css.join("\n\n");
   }
 
   function injectStyle() {
     removeStyle();
 
-    if (tags.length == 0) return;
+    if (tags.length == 0 && regions.length == 0 && inlineRegionColors.length == 0)
+      return;
 
     styleEl = document.createElement("style");
     styleEl.setAttribute("data-better-comments", "true");
@@ -249,11 +376,23 @@
     if (session && sessions.indexOf(session) < 0) sessions.push(session);
   }
 
+  function scheduleStyleRefresh() {
+    if (stylePending) return;
+
+    stylePending = true;
+    setTimeout(function () {
+      stylePending = false;
+      inlineRegionColors = getInlineRegionColors();
+      injectStyle();
+    }, 50);
+  }
+
   function refreshEditor(editor) {
     if (!editor || !editor.session) return;
 
     var session = editor.session;
     trackSession(session);
+    scheduleStyleRefresh();
 
     var info = getRuleInfo(session);
     if (info && patchRules(info.rules)) {
@@ -273,12 +412,17 @@
     var onChangeSession = function () {
       refreshEditor(editor);
     };
+    var onChange = function () {
+      scheduleStyleRefresh();
+    };
 
     editor.$betterCommentsHandlers = {
       changeSession: onChangeSession,
+      change: onChange,
     };
 
     editor.on("changeSession", onChangeSession);
+    editor.on("change", onChange);
     editors.push(editor);
     refreshEditor(editor);
   }
@@ -292,6 +436,8 @@
     var betterComments = config.betterComments || {};
 
     tags = normalizeTags(betterComments.tags);
+    regions = normalizeRegions(betterComments.regions);
+    inlineRegionColors = getInlineRegionColors();
     injectStyle();
 
     patchEditor(window.aceEditor);
@@ -308,6 +454,7 @@
 
       if (handlers) {
         editor.off("changeSession", handlers.changeSession);
+        editor.off("change", handlers.change);
       }
 
       editor.$betterCommentsHandlers = null;
@@ -340,6 +487,9 @@
     editors = [];
     sessions = [];
     tags = [];
+    regions = [];
+    inlineRegionColors = [];
+    stylePending = false;
   }
 
   GMEdit.register("better-comments", {
